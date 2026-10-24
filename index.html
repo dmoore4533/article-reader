@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1f3a5f">
+<title>Article Reader</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<style>
+  :root {
+    --bg: #f6f7f9; --fg: #1b1f24; --muted: #5b6570; --card: #ffffff; --line: #d3d8df;
+    --accent: #1f5fbf; --accent-fg: #ffffff; --err: #b3261e; --ok: #1b7a3a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121417; --fg: #e8eaed; --muted: #9aa4af; --card: #1b1e23; --line: #2c3138;
+      --accent: #6ea8ff; --accent-fg: #0b1220; --err: #ff8a80; --ok: #7bd88f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  .sub, .muted { color: var(--muted); font-size: 14px; }
+  .sub { margin: 0 0 16px; }
+  label { display: block; margin: 16px 0 4px; font-weight: 600; font-size: 14px; }
+  input, textarea, select {
+    width: 100%; padding: 10px; font: inherit; color: var(--fg); background: var(--card);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  textarea { min-height: 200px; resize: vertical; }
+  button {
+    font: inherit; padding: 12px 16px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--card); color: var(--fg); min-height: 48px;
+  }
+  button.primary { width: 100%; margin-top: 14px; background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .55; }
+  #status { margin-top: 12px; min-height: 22px; font-size: 15px; }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  .notice { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; background: var(--card); font-size: 14px; }
+  #result { margin-top: 14px; }
+  audio { width: 100%; margin-bottom: 8px; }
+  details { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 12px; }
+  summary { font-weight: 600; cursor: pointer; padding: 8px 0; }
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  .row > * { flex: 1; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Article Reader</h1>
+  <p class="sub">Share selected text from Chrome to this app, and it saves an MP3.</p>
+
+  <div id="notice" class="notice" hidden></div>
+
+  <label for="title">Title (used in the file name)</label>
+  <input id="title" type="text" placeholder="Optional. Defaults to the first few words">
+
+  <label for="text">Text to read</label>
+  <textarea id="text" placeholder="Share text from Chrome, or paste it here."></textarea>
+  <div id="count" class="muted"></div>
+
+  <button id="go" class="primary">Convert and save MP3</button>
+  <div id="status" role="status" aria-live="polite"></div>
+
+  <div id="result" hidden>
+    <audio id="player" controls></audio>
+    <button id="again">Save again</button>
+  </div>
+
+  <details id="settings">
+    <summary>Settings</summary>
+
+    <label for="apiKey">ElevenLabs API key</label>
+    <input id="apiKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="muted">Stored only in this browser on this phone.</div>
+
+    <label for="voiceId">Voice ID</label>
+    <input id="voiceId" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="row">
+      <button id="loadVoices" type="button">Load my voices</button>
+    </div>
+    <select id="voiceList" hidden></select>
+    <div class="muted" style="margin-top:6px">Use a stock voice, one you own, or a licensed voice you have rights to.</div>
+
+    <label for="model">Model</label>
+    <input id="model" type="text" list="models" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <datalist id="models">
+      <option value="eleven_multilingual_v2"></option>
+      <option value="eleven_turbo_v2_5"></option>
+      <option value="eleven_flash_v2_5"></option>
+    </datalist>
+    <div class="muted">Flash models cost about half as many credits.</div>
+
+    <label for="prefix">File name prefix</label>
+    <input id="prefix" type="text" autocomplete="off">
+
+    <button id="saveSettings" class="primary" type="button">Save settings</button>
+    <div id="settingsMsg" class="muted" style="margin-top:8px"></div>
+  </details>
+</main>
+
+<script>
+"use strict";
+
+// <pure>
+function splitSentences(t) {
+  return t.replace(/\r/g, "").match(/[^.!?\n]+(?:[.!?]+["')\]]*)?\s*|\n+/g) || [t];
+}
+
+function chunkText(t, max) {
+  max = max || 4500;
+  const out = [];
+  let cur = "";
+  for (let s of splitSentences(t)) {
+    while (s.length > max) {
+      let cut = s.lastIndexOf(" ", max);
+      if (cut < max * 0.5) cut = max;
+      if (cur) { out.push(cur); cur = ""; }
+      out.push(s.slice(0, cut));
+      s = s.slice(cut);
+    }
+    if ((cur + s).length > max && cur) { out.push(cur); cur = ""; }
+    cur += s;
+  }
+  if (cur.trim()) out.push(cur);
+  return out.map(function (c) { return c.trim(); }).filter(Boolean);
+}
+
+function cleanName(s) {
+  return String(s || "").replace(/[\\\/:*?"<>|\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function firstWords(t, n) {
+  return String(t || "")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[^\p{L}\p{N}\s'-]/gu, " ")
+    .split(/\s+/).filter(Boolean).slice(0, n).join(" ");
+}
+
+function pad(n) { return String(n).padStart(2, "0"); }
+
+function stamp(d) {
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    " " + pad(d.getHours()) + pad(d.getMinutes());
+}
+
+function makeFileName(prefix, title, text, d) {
+  let t = cleanName(title) || firstWords(text, 7) || "Selection";
+  if (t.length > 70) t = t.slice(0, 70).trim();
+  const p = cleanName(prefix);
+  return (p ? p + " - " : "") + t + " - " + stamp(d) + ".mp3";
+}
+// </pure>
+
+const $ = function (id) { return document.getElementById(id); };
+
+const store = {
+  get: function (k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+  set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+
+let currentBlob = null;
+let currentName = "";
+let playerUrl = null;
+let wakeLock = null;
+
+function setStatus(msg, cls) {
+  const el = $("status");
+  el.textContent = msg || "";
+  el.className = cls || "";
+}
+
+function updateCount() {
+  const n = $("text").value.trim().length;
+  $("count").textContent = n
+    ? n.toLocaleString() + " characters, about " + Math.max(1, Math.round(n / 850)) + " min of audio"
+    : "";
+}
+
+function loadSettings() {
+  $("apiKey").value = store.get("apiKey", "");
+  $("voiceId").value = store.get("voiceId", "");
+  $("model").value = store.get("model", "eleven_multilingual_v2");
+  $("prefix").value = store.get("prefix", "Article");
+  if (!$("apiKey").value || !$("voiceId").value) $("settings").open = true;
+}
+
+function settingsMsg(msg, isErr) {
+  const el = $("settingsMsg");
+  el.textContent = msg;
+  el.className = isErr ? "err" : "muted";
+}
+
+function saveSettings() {
+  store.set("apiKey", $("apiKey").value.trim());
+  store.set("voiceId", $("voiceId").value.trim());
+  store.set("model", $("model").value.trim() || "eleven_multilingual_v2");
+  store.set("prefix", $("prefix").value.trim());
+  settingsMsg("Saved.");
+  setTimeout(function () { settingsMsg(""); }, 2500);
+}
+
+async function loadVoices() {
+  const key = $("apiKey").value.trim();
+  if (!key) { settingsMsg("Enter your API key first.", true); return; }
+  settingsMsg("Loading voices...");
+  try {
+    const res = await fetch("https://api.elevenlabs.io/v1/voices", { headers: { "xi-api-key": key } });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    const voices = (data.voices || []).slice().sort(function (a, b) { return a.name.localeCompare(b.name); });
+    const sel = $("voiceList");
+    sel.innerHTML = "";
+    sel.appendChild(new Option("Choose a voice...", ""));
+    voices.forEach(function (v) {
+      sel.appendChild(new Option(v.name + (v.category ? " (" + v.category + ")" : ""), v.voice_id));
+    });
+    sel.hidden = false;
+    settingsMsg(voices.length + " voices loaded. Pick one, then Save settings.");
+  } catch (e) {
+    settingsMsg("Could not load voices (" + e.message + "). Paste a voice ID instead.", true);
+  }
+}
+
+async function tts(text, prev, next, key, voice, model) {
+  async function call(withContext) {
+    const body = { text: text, model_id: model };
+    if (withContext && prev) body.previous_text = prev;
+    if (withContext && next) body.next_text = next;
+    return fetch(
+      "https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voice) + "?output_format=mp3_44100_128",
+      {
+        method: "POST",
+        headers: { "xi-api-key": key, "Content-Type": "application/json", "Accept": "audio/mpeg" },
+        body: JSON.stringify(body)
+      }
+    );
+  }
+  let res = await call(true);
+  if ((res.status === 400 || res.status === 422) && (prev || next)) res = await call(false);
+  if (!res.ok) {
+    let msg = "";
+    try {
+      const j = await res.json();
+      msg = (j.detail && j.detail.message) || j.detail || JSON.stringify(j);
+    } catch (e) {
+      msg = "";
+    }
+    throw new Error("ElevenLabs " + res.status + (msg ? ": " + String(msg).slice(0, 300) : ""));
+  }
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+}
+
+function setBusy(b) {
+  $("go").disabled = b;
+  $("go").textContent = b ? "Working..." : "Convert and save MP3";
+}
+
+async function convert() {
+  const key = $("apiKey").value.trim();
+  const voice = $("voiceId").value.trim();
+  const model = $("model").value.trim() || "eleven_multilingual_v2";
+  const raw = $("text").value.replace(/\r/g, "").trim();
+
+  if (!key || !voice) {
+    $("settings").open = true;
+    setStatus("Enter your API key and voice ID in Settings first.", "err");
+    return;
+  }
+  if (!raw) { setStatus("There is no text to convert.", "err"); return; }
+  if (raw.length > 20000 &&
+      !confirm("This is " + raw.length.toLocaleString() + " characters and will use a lot of credits. Continue?")) return;
+
+  saveSettings();
+  const chunks = chunkText(raw, 4500);
+  $("result").hidden = true;
+  setBusy(true);
+
+  try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+
+  try {
+    const parts = [];
+    for (let i = 0; i < chunks.length; i++) {
+      setStatus("Converting part " + (i + 1) + " of " + chunks.length + ". Keep this screen open.");
+      const prev = i > 0 ? chunks[i - 1].slice(-300) : "";
+      const next = i < chunks.length - 1 ? chunks[i + 1].slice(0, 300) : "";
+      parts.push(await tts(chunks[i], prev, next, key, voice, model));
+    }
+    currentBlob = new Blob(parts, { type: "audio/mpeg" });
+    currentName = makeFileName($("prefix").value, $("title").value, raw, new Date());
+
+    if (playerUrl) URL.revokeObjectURL(playerUrl);
+    playerUrl = URL.createObjectURL(currentBlob);
+    $("player").src = playerUrl;
+    $("result").hidden = false;
+
+    saveBlob(currentBlob, currentName);
+    setStatus("Done: " + currentName, "ok");
+  } catch (e) {
+    setStatus(e.message || String(e), "err");
+  } finally {
+    setBusy(false);
+    try { if (wakeLock) { await wakeLock.release(); wakeLock = null; } } catch (e) {}
+  }
+}
+
+function applyShare() {
+  const p = new URLSearchParams(location.search);
+  const text = (p.get("text") || "").trim();
+  const title = (p.get("title") || "").trim();
+  const url = (p.get("url") || "").trim();
+  if (!text && !title && !url) return;
+
+  const looksLikeLink = function (s) { return /^https?:\/\/\S+$/.test(s); };
+  const notice = $("notice");
+
+  if (text && !looksLikeLink(text)) {
+    $("text").value = text;
+    if (title) $("title").value = title;
+  } else {
+    notice.textContent = "That share was only a link. This app reads text, so select the article text itself, then share that.";
+    notice.hidden = false;
+    if (title) $("title").value = title;
+  }
+  history.replaceState(null, "", location.pathname);
+}
+
+$("go").addEventListener("click", convert);
+$("again").addEventListener("click", function () { if (currentBlob) saveBlob(currentBlob, currentName); });
+$("saveSettings").addEventListener("click", saveSettings);
+$("loadVoices").addEventListener("click", loadVoices);
+$("voiceList").addEventListener("change", function () { if ($("voiceList").value) $("voiceId").value = $("voiceList").value; });
+$("text").addEventListener("input", updateCount);
+
+loadSettings();
+applyShare();
+updateCount();
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch(function () {});
+}
+</script>
+</body>
+</html>
